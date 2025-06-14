@@ -192,3 +192,10 @@ async def search_llm(data: Dict[str, Any]):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.getenv("PORT", 10000))  # Render will inject PORT; fallback to 10000 locally
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
