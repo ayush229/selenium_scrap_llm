@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+undetected-chromedriver
+sentence-transformers
+scikit-learn
+httpx
