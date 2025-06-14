@@ -14,7 +14,7 @@ TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "span", "b", "strong", "d
 VECTOR_STORE_PATH = "./vector_store"
 os.makedirs(VECTOR_STORE_PATH, exist_ok=True)
 
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+embedding_model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
 
 # --------------------- Scraper with Playwright ---------------------
