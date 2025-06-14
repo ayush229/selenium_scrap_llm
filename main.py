@@ -3,7 +3,6 @@ from fastapi.responses import JSONResponse
 from typing import Dict, Any, List
 import re, os, uuid, json, asyncio
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import httpx
 from playwright.async_api import async_playwright
@@ -14,7 +13,7 @@ TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "span", "b", "strong", "d
 VECTOR_STORE_PATH = "./vector_store"
 os.makedirs(VECTOR_STORE_PATH, exist_ok=True)
 
-embedding_model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
+embedding_model = None  # Will be loaded later
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
 
 # --------------------- Scraper with Playwright ---------------------
@@ -42,14 +41,15 @@ async def extract_visible_content(page) -> List[str]:
 
 async def scrape_with_playwright(url: str) -> List[str]:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=[
+            "--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"
+        ])
         page = await browser.new_page()
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(2000)
 
         content = await extract_visible_content(page)
 
-        # Try clicking visible buttons/tabs
         buttons = await page.query_selector_all("button")
         for btn in buttons:
             try:
@@ -62,6 +62,7 @@ async def scrape_with_playwright(url: str) -> List[str]:
             except:
                 continue
 
+        await page.close()
         await browser.close()
         return merge_paragraphs(content)
 
@@ -87,6 +88,13 @@ def merge_paragraphs(lines: List[str], max_len=400) -> List[str]:
     return final
 
 # --------------------- API Endpoints ---------------------
+
+@app.on_event("startup")
+async def load_model():
+    global embedding_model
+    if embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        embedding_model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
 
 @app.post("/scrape_store")
 def scrape_store(data: Dict[str, Any]):
@@ -166,3 +174,9 @@ async def search_llm(data: Dict[str, Any]):
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# Optional: local run support
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
