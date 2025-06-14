@@ -1,0 +1,26 @@
+app = "your-app-name" # This will be auto-filled
+
+kill_signal = "SIGINT"
+kill_timeout = 5
+processes = []
+
+[env]
+  GROQ_API_KEY = "your_groq_key"
+
+[experimental]
+  auto_rollback = true
+
+[build]
+  dockerfile = "./Dockerfile"
+
+[[services]]
+  internal_port = 8000
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
