@@ -1,6 +1,8 @@
 fastapi
 uvicorn
-undetected-chromedriver
+httpx
 sentence-transformers
 scikit-learn
-httpx
+undetected-chromedriver
+selenium
+numpy
