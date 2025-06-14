@@ -3,6 +3,5 @@ uvicorn
 httpx
 sentence-transformers
 scikit-learn
-undetected-chromedriver
-selenium
 numpy
+playwright
