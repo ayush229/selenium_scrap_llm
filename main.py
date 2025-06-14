@@ -1,40 +1,30 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, List
-import re, os, uuid, json
+import re, os, uuid, json, asyncio
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import httpx
+from playwright.async_api import async_playwright
 
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+app = FastAPI()
 
-app = FastAPI(
-    title="Precise Scraper + Vector + LLM",
-    description="Scrapes, merges short lines with context, stores clean vectors, answers via Groq LLaMA.",
-    version="3.6"
-)
-
-TAGS_TO_EXTRACT = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "span", "b", "strong", "div"]
+TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "span", "b", "strong", "div"]
 VECTOR_STORE_PATH = "./vector_store"
 os.makedirs(VECTOR_STORE_PATH, exist_ok=True)
 
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-GROQ_API_KEY = "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"  # ← Replace this
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
 
-# ------------------------- Scraping & Merging -------------------------
+# --------------------- Scraper with Playwright ---------------------
 
-def extract_visible_content(driver) -> List[str]:
+async def extract_visible_content(page) -> List[str]:
     script = f"""
-        const tags = {TAGS_TO_EXTRACT};
+        const tags = {TAGS};
         const content = [];
         tags.forEach(tag => {{
-            const elements = document.querySelectorAll(tag);
-            elements.forEach(el => {{
+            document.querySelectorAll(tag).forEach(el => {{
                 const style = window.getComputedStyle(el);
                 if (
                     el.innerText &&
@@ -48,116 +38,100 @@ def extract_visible_content(driver) -> List[str]:
         }});
         return content;
     """
-    raw = driver.execute_script(script)
-    return [re.sub(r'\s+', ' ', item).strip() for item in raw if item.strip()]
+    return await page.evaluate(script)
 
-def smart_merge_lines(lines: List[str], max_len: int = 400) -> List[str]:
-    """Merge short lines with context — e.g., 'Code:' + 'GODARSHAN'."""
-    merged = []
-    buffer = ""
-    for i, line in enumerate(lines):
-        if len(line) < 40 or (buffer and len(buffer) + len(line) < max_len):
-            buffer += " " + line
-        else:
-            if buffer.strip():
-                merged.append(buffer.strip())
-            buffer = line
-    if buffer.strip():
-        merged.append(buffer.strip())
+async def scrape_with_playwright(url: str) -> List[str]:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(2000)
 
-    # Final dedup
-    seen = set()
-    clean = []
-    for para in merged:
-        para = re.sub(r'\s+', ' ', para).strip()
-        if para and para not in seen and len(para) > 10:
-            seen.add(para)
-            clean.append(para)
-    return clean
+        content = await extract_visible_content(page)
 
-def scrape_and_extract(url: str) -> List[str]:
-    options = Options()
-    options.headless = False
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--start-maximized")
-
-    driver = uc.Chrome(options=options)
-    wait = WebDriverWait(driver, 10)
-    driver.get(url)
-    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-
-    lines = extract_visible_content(driver)
-
-    # Try clicking all tabs
-    tab_buttons = driver.find_elements(By.XPATH, "//button")
-    clicked = set()
-    for btn in tab_buttons:
-        try:
-            label = btn.text.strip()
-            if not label or label in clicked:
+        # Try clicking visible buttons/tabs
+        buttons = await page.query_selector_all("button")
+        for btn in buttons:
+            try:
+                label = await btn.inner_text()
+                if not label.strip():
+                    continue
+                await btn.click()
+                await page.wait_for_timeout(1000)
+                content += await extract_visible_content(page)
+            except:
                 continue
-            btn.click()
-            clicked.add(label)
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            lines += extract_visible_content(driver)
-        except Exception:
-            continue
 
-    driver.quit()
-    return smart_merge_lines(lines)
+        await browser.close()
+        return merge_paragraphs(content)
 
-# ------------------------- API Endpoints -------------------------
+def merge_paragraphs(lines: List[str], max_len=400) -> List[str]:
+    merged = []
+    buf = ""
+    for line in lines:
+        if len(line) < 40 or (buf and len(buf) + len(line) < max_len):
+            buf += " " + line
+        else:
+            if buf.strip():
+                merged.append(buf.strip())
+            buf = line
+    if buf.strip():
+        merged.append(buf.strip())
+
+    seen, final = set(), []
+    for para in merged:
+        clean = re.sub(r'\s+', ' ', para).strip()
+        if clean and clean not in seen and len(clean) > 10:
+            seen.add(clean)
+            final.append(clean)
+    return final
+
+# --------------------- API Endpoints ---------------------
 
 @app.post("/scrape_store")
 def scrape_store(data: Dict[str, Any]):
     url = data.get("url")
     if not url:
-        return JSONResponse(content={"error": "URL is required"}, status_code=400)
+        return JSONResponse(content={"error": "Missing URL"}, status_code=400)
 
     try:
-        paragraphs = scrape_and_extract(url)
+        paragraphs = asyncio.run(scrape_with_playwright(url))
         vectors = embedding_model.encode(paragraphs).tolist()
-        search_code = str(uuid.uuid4())[:8]
-        with open(f"{VECTOR_STORE_PATH}/{search_code}.json", "w") as f:
+
+        code = str(uuid.uuid4())[:8]
+        with open(f"{VECTOR_STORE_PATH}/{code}.json", "w") as f:
             json.dump({"texts": paragraphs, "vectors": vectors}, f)
-        return {"success": True, "search_code": search_code}
+
+        return {"success": True, "search_code": code}
     except Exception as e:
         return JSONResponse(content={"success": False, "error": str(e)}, status_code=500)
-
 
 @app.post("/search_llm")
 async def search_llm(data: Dict[str, Any]):
     query = data.get("query")
     code = data.get("search_code")
     if not query or not code:
-        return JSONResponse(content={"error": "query and search_code are required"}, status_code=400)
+        return JSONResponse(content={"error": "query and search_code required"}, status_code=400)
 
     try:
-        file_path = f"{VECTOR_STORE_PATH}/{code}.json"
-        if not os.path.exists(file_path):
-            return JSONResponse(content={"error": "Invalid search_code"}, status_code=404)
+        path = f"{VECTOR_STORE_PATH}/{code}.json"
+        if not os.path.exists(path):
+            return JSONResponse(content={"error": "Invalid code"}, status_code=404)
 
-        with open(file_path, "r") as f:
-            stored = json.load(f)
+        with open(path, "r") as f:
+            store = json.load(f)
 
-        query_vec = embedding_model.encode([query])
-        stored_vecs = np.array(stored["vectors"])
-        sims = cosine_similarity(query_vec, stored_vecs)[0]
+        qvec = embedding_model.encode([query])
+        svecs = np.array(store["vectors"])
+        sims = cosine_similarity(qvec, svecs)[0]
 
-        top_chunks = sorted(
-            [(score, stored["texts"][idx]) for idx, score in enumerate(sims)],
-            reverse=True
-        )
-        top_chunks = [(s, t) for s, t in top_chunks if s > 0.35][:5]
+        top = sorted([(s, store["texts"][i]) for i, s in enumerate(sims)], reverse=True)
+        top = [(s, t) for s, t in top if s > 0.35][:5]
 
-        if not top_chunks:
-            return {"response": "No relevant information found to answer this."}
+        if not top:
+            return {"response": "No relevant information found."}
 
-        context = "\n\n".join(list(dict.fromkeys([t for _, t in top_chunks])))
-        best_score = top_chunks[0][0]
-
+        context = "\n\n".join(dict.fromkeys([t for _, t in top]))
         messages = [
             {
                 "role": "system",
@@ -185,17 +159,10 @@ async def search_llm(data: Dict[str, Any]):
             result = res.json()
 
         return {
-            "matched_score": round(best_score, 2),
-            "matched_chunks": [t for _, t in top_chunks],
+            "matched_score": round(top[0][0], 2),
+            "matched_chunks": [t for _, t in top],
             "response": result["choices"][0]["message"]["content"]
         }
 
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    port = int(os.getenv("PORT", 10000))  # Render will inject PORT; fallback to 10000 locally
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
-
